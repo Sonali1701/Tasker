@@ -19,6 +19,11 @@ if not b64_str:
     st.error("FIREBASE_SERVICE_ACCOUNT_B64 not found in Streamlit secrets or environment.")
     st.stop()
 
+missing_padding = len(b64_str) % 4
+if missing_padding:
+    b64_str += "=" * (4 - missing_padding)
+
+
 try:
     sa_info = json.loads(base64.b64decode(b64_str).decode("utf-8"))
 except Exception as e:
