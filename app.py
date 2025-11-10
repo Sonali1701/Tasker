@@ -6,7 +6,7 @@ from datetime import datetime
 st.set_page_config(page_title="AI Workspace", layout="wide")
 init_db()
 
-st.title("🧠 AI-Based Notes & Task Follow-Up System (Gemini)")
+st.title("AI-Based Notes & Task Follow-Up System")
 
 menu = st.sidebar.radio("Navigation", ["📝 Notes", "✅ Tasks", "💬 AI Chat"])
 
