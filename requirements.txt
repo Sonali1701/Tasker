@@ -1,3 +1,4 @@
 streamlit
-google-genai
-sqlite-utils
+firebase-admin
+pyrebase4
+google-generativeai
