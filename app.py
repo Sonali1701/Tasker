@@ -1,6 +1,6 @@
 import streamlit as st
-from db import init_db, add_note, get_notes, add_task, get_tasks, update_task_status
-from ai_utils import ai_summarize, ai_rewrite, ai_expand, ai_followup, ai_chat
+from db import init_db, add_task, get_tasks, update_task_status
+from ai_utils import ai_summarize, ai_rewrite,  ai_followup, 
 from datetime import datetime
 
 st.set_page_config(page_title="AI Workspace", layout="wide")
