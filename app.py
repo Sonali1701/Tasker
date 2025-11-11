@@ -1,10 +1,11 @@
 import streamlit as st
 import google.generativeai as genai
 import firebase_admin
-from firebase_admin import credentials, firestore, auth
-import json, base64, smtplib
+from firebase_admin import credentials, firestore
+import json, base64, requests
+from datetime import datetime
 from email.mime.text import MIMEText
-from datetime import datetime, date
+import smtplib
 
 # --- PAGE CONFIG ---
 st.set_page_config(page_title="Team Tasker", layout="wide")
@@ -13,8 +14,10 @@ st.set_page_config(page_title="Team Tasker", layout="wide")
 if not firebase_admin._apps:
     try:
         FIREBASE_SERVICE_ACCOUNT_B64 = st.secrets.get("FIREBASE_SERVICE_ACCOUNT_B64", "")
+        FIREBASE_WEB_API_KEY = st.secrets.get("FIREBASE_WEB_API_KEY", "")
         if not FIREBASE_SERVICE_ACCOUNT_B64:
-            raise ValueError("Missing FIREBASE_SERVICE_ACCOUNT_B64 in Streamlit secrets")
+            raise ValueError("Missing FIREBASE_SERVICE_ACCOUNT_B64 in secrets")
+
         decoded_json = base64.b64decode(FIREBASE_SERVICE_ACCOUNT_B64).decode("utf-8")
         service_account_info = json.loads(decoded_json)
         cred = credentials.Certificate(service_account_info)
@@ -26,14 +29,33 @@ if not firebase_admin._apps:
 else:
     db = firestore.client()
 
-# --- GOOGLE GEMINI SETUP ---
+# --- GOOGLE GEMINI ---
 genai.configure(api_key=st.secrets.get("GOOGLE_API_KEY", ""))
 model = genai.GenerativeModel("gemini-2.5-flash")
 
-# --- HELPER FUNCTIONS ---
+# --- EMAIL SETUP (GMAIL APP PASSWORD) ---
+EMAIL_SENDER = st.secrets.get("EMAIL_SENDER")
+EMAIL_PASSWORD = st.secrets.get("EMAIL_APP_PASSWORD")
+
+def send_email(to_emails, subject, message):
+    try:
+        msg = MIMEText(message, "html")
+        msg["Subject"] = subject
+        msg["From"] = EMAIL_SENDER
+        msg["To"] = ", ".join(to_emails)
+
+        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
+            server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+            server.sendmail(EMAIL_SENDER, to_emails, msg.as_string())
+        return True
+    except Exception as e:
+        st.error(f"Email error: {e}")
+        return False
+
+# --- AI HELPERS ---
 def ai_followup(task_text):
     try:
-        response = model.generate_content(f"Generate a short follow-up message for this task: {task_text}")
+        response = model.generate_content(f"Generate a short follow-up message for: {task_text}")
         return response.text.strip()
     except Exception as e:
         return f"❌ AI Error: {e}"
@@ -45,6 +67,7 @@ def ai_chat(query):
     except Exception as e:
         return f"❌ AI Error: {e}"
 
+# --- FIRESTORE HELPERS ---
 def add_task(task, assigned_to, assigned_by, due_date, status="Pending"):
     db.collection("tasks").add({
         "task": task,
@@ -56,7 +79,21 @@ def add_task(task, assigned_to, assigned_by, due_date, status="Pending"):
     })
 
 def get_all_tasks():
-    return [doc.to_dict() | {"id": doc.id} for doc in db.collection("tasks").order_by("timestamp").stream()]
+    return [doc.to_dict() | {"id": doc.id} for doc in db.collection("tasks").stream()]
+
+def add_meeting(title, date, link, attendees, created_by):
+    db.collection("meetings").add({
+        "title": title,
+        "date": date,
+        "link": link,
+        "attendees": attendees,
+        "created_by": created_by,
+        "timestamp": datetime.now().isoformat()
+    })
+
+def get_meetings():
+    docs = db.collection("meetings").order_by("date").stream()
+    return [d.to_dict() for d in docs]
 
 def add_note(user, note):
     db.collection("notes").add({
@@ -69,70 +106,35 @@ def get_notes(user):
     docs = db.collection("notes").where("user", "==", user).stream()
     return [d.to_dict() for d in docs]
 
-def add_meeting(title, date, link, attendees, organizer):
-    db.collection("meetings").add({
-        "title": title,
+def add_travel_plan(from_city, to_city, traveller, date, ticket_url, added_by):
+    db.collection("travels").add({
+        "from_city": from_city,
+        "to_city": to_city,
+        "traveller": traveller,
         "date": date,
-        "link": link,
-        "attendees": attendees,
-        "organizer": organizer,
+        "ticket_url": ticket_url,
+        "added_by": added_by,
         "timestamp": datetime.now().isoformat()
     })
 
-def get_meetings():
-    docs = db.collection("meetings").order_by("date").stream()
+def get_travel_plans():
+    docs = db.collection("travels").order_by("date").stream()
     return [d.to_dict() for d in docs]
 
-# --- SEND EMAIL INVITES ---
-def send_meeting_invites(emails, title, time_str, organizer, link):
-    sender = st.secrets["EMAIL_SENDER"]
-    password = st.secrets["EMAIL_APP_PASSWORD"]
-
-    subject = f"📅 Meeting Invite: {title}"
-    html_body = f"""
-    <html>
-      <body style="font-family:Arial, sans-serif; color:#333;">
-        <h2 style="color:#1a73e8;">📅 Meeting Invitation</h2>
-        <p>Hello Team,</p>
-        <p>You are invited to attend the following meeting:</p>
-        <table style="border-collapse: collapse;">
-          <tr><td><strong>📌 Title:</strong></td><td>{title}</td></tr>
-          <tr><td><strong>📅 Date:</strong></td><td>{time_str}</td></tr>
-          <tr><td><strong>👤 Organized by:</strong></td><td>{organizer}</td></tr>
-        </table>
-        <br>
-        <a href="{link}" style="display:inline-block; padding:10px 15px; background-color:#1a73e8; color:white; border-radius:6px; text-decoration:none;">Join Meeting</a>
-        <br><br>
-        <p>See you there!</p>
-        <p>— Team Tasker</p>
-      </body>
-    </html>
-    """
-
-    msg = MIMEText(html_body, "html")
-    msg["From"] = sender
-    msg["Subject"] = subject
-
-    try:
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(sender, password)
-        for mail in emails:
-            msg["To"] = mail
-            server.sendmail(sender, mail, msg.as_string())
-        server.quit()
-        st.success("✅ Meeting invites sent successfully!")
-    except Exception as e:
-        st.error(f"Failed to send invites: {e}")
-
-# --- SESSION STATE ---
+# --- AUTHENTICATION ---
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "email" not in st.session_state:
     st.session_state.email = None
 
-# --- SIDEBAR: AUTHENTICATION ---
 st.sidebar.title("🔐 Team Login")
+
+def verify_user(email, password):
+    FIREBASE_WEB_API_KEY = st.secrets.get("FIREBASE_WEB_API_KEY", "")
+    url = f"https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key={FIREBASE_WEB_API_KEY}"
+    payload = {"email": email, "password": password, "returnSecureToken": True}
+    response = requests.post(url, json=payload)
+    return response.status_code == 200
 
 if not st.session_state.logged_in:
     choice = st.sidebar.radio("Select", ["Login", "Sign Up"])
@@ -142,70 +144,60 @@ if not st.session_state.logged_in:
     if choice == "Sign Up":
         if st.sidebar.button("Create Account"):
             try:
-                auth.create_user(email=email, password=password)
-                st.sidebar.success("✅ Account created! Please log in.")
+                url = f"https://identitytoolkit.googleapis.com/v1/accounts:signUp?key={st.secrets['FIREBASE_WEB_API_KEY']}"
+                res = requests.post(url, json={"email": email, "password": password, "returnSecureToken": True})
+                if res.status_code == 200:
+                    st.sidebar.success("✅ Account created! Please log in.")
+                else:
+                    st.sidebar.error(res.json().get("error", {}).get("message", "Error"))
             except Exception as e:
                 st.sidebar.error(e)
-
-    elif choice == "Login":
+    else:
         if st.sidebar.button("Login"):
-            try:
-                user = auth.get_user_by_email(email)
-                # Firebase Admin SDK doesn't directly verify passwords
-                # So we mimic password verification through custom logic or Firebase REST if needed
+            if verify_user(email, password):
                 st.session_state.logged_in = True
                 st.session_state.email = email
                 st.sidebar.success(f"✅ Logged in as {email}")
                 st.rerun()
-            except Exception:
-                st.sidebar.error("Invalid login credentials. Please check your email and password.")
+            else:
+                st.sidebar.error("Invalid email or password.")
 else:
-    st.sidebar.success(f"Welcome back, {st.session_state.email} 👋")
+    st.sidebar.success(f"Welcome, {st.session_state.email} 👋")
     if st.sidebar.button("Logout"):
         st.session_state.logged_in = False
         st.session_state.email = None
         st.rerun()
 
-# --- STOP IF NOT LOGGED IN ---
 if not st.session_state.logged_in:
     st.info("👋 Please log in to continue.")
     st.stop()
 
 email = st.session_state.email
 
-# --- SIDEBAR: PENDING TASKS + UPCOMING MEETINGS ---
+# --- SIDEBAR DASHBOARD ---
 st.sidebar.markdown("---")
-st.sidebar.subheader("🕒 Pending Tasks")
-pending_tasks = [t for t in get_all_tasks() if t.get("status") == "Pending"]
-if pending_tasks:
-    for t in pending_tasks[:5]:
-        st.sidebar.write(f"- {t['task']} (📅 {t['due_date']})")
-else:
-    st.sidebar.caption("No pending tasks.")
+st.sidebar.subheader("📋 Pending Tasks")
+tasks = [t for t in get_all_tasks() if t["status"] == "Pending"]
+for t in tasks[:5]:
+    st.sidebar.markdown(f"- {t['task']} ({t['assigned_to']})")
 
+st.sidebar.markdown("---")
 st.sidebar.subheader("📅 Upcoming Meetings")
-upcoming_meetings = [m for m in get_meetings() if m.get("date") >= str(date.today())]
-if upcoming_meetings:
-    for m in upcoming_meetings[:5]:
-        st.sidebar.write(f"- {m['title']} ({m['date']})")
-else:
-    st.sidebar.caption("No upcoming meetings.")
+meetings = [m for m in get_meetings()]
+for m in meetings[:5]:
+    st.sidebar.markdown(f"- {m['title']} on {m['date']}")
 
-# --- MAIN CONTENT ---
-tabs = st.tabs(["📋 Tasks", "📝 Notes", "💬 AI Playground", "📅 Meetings"])
+# --- MAIN TABS ---
+tabs = st.tabs(["📋 Tasks", "📝 Notes", "💬 AI Playground", "📅 Meetings", "✈️ Travel Plans"])
 
-# --- TASKS TAB ---
+# --- TASK TAB ---
 with tabs[0]:
     st.header("📋 Team Tasks")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        task = st.text_input("Task Description")
-    with col2:
-        assigned_to = st.text_input("Assigned To (Email)")
-    with col3:
-        due_date = st.date_input("Due Date")
+    task = st.text_input("Task Description")
+    assigned_to = st.text_input("Assigned To (Email)")
+    due_date = st.date_input("Due Date")
 
-    if st.button("➕ Add Task"):
+    if st.button("Add Task"):
         if task and assigned_to:
             add_task(task, assigned_to, email, str(due_date))
             st.success("✅ Task Added!")
@@ -214,70 +206,77 @@ with tabs[0]:
             st.warning("Please fill all fields before adding a task.")
 
     st.subheader("All Tasks")
-    tasks = get_all_tasks()
-    for t in tasks:
-        t_name = t.get("task", "Untitled Task")
-        t_status = t.get("status", "Pending")
-        t_assignee = t.get("assigned_to", "N/A")
-        t_due = t.get("due_date", "—")
-        t_by = t.get("assigned_by", "—")
-
-        st.markdown(f"**{t_name}** — 🧑‍💼 *{t_assignee}* | 📅 *{t_due}* | Assigned by *{t_by}* | Status: *{t_status}*")
+    for t in get_all_tasks():
+        st.markdown(f"**{t['task']}** — *{t['assigned_to']}* | 📅 {t['due_date']} | Status: {t['status']}")
         col1, col2 = st.columns([1, 1])
         with col1:
-            if st.button(f"✅ Mark Done ({t_name})"):
+            if st.button(f"✅ Done ({t['task']})"):
                 db.collection("tasks").document(t["id"]).update({"status": "Done"})
                 st.rerun()
         with col2:
-            if st.button(f"🤖 Follow-up ({t_name})"):
-                ai_text = ai_followup(t_name)
-                st.info(f"AI Suggested: {ai_text}")
+            if st.button(f"🤖 Follow-up ({t['task']})"):
+                st.info(ai_followup(t['task']))
 
 # --- NOTES TAB ---
 with tabs[1]:
-    st.header("📝 Personal Notes")
+    st.header("📝 Notes")
     note = st.text_area("Write a note")
-    if st.button("💾 Save Note"):
+    if st.button("Save Note"):
         add_note(email, note)
         st.success("✅ Note saved!")
         st.rerun()
 
-    st.subheader("Your Notes")
-    notes = get_notes(email)
-    for n in notes:
-        st.markdown(f"- {n.get('note')}  \n🕒 *{n.get('timestamp', '')}*")
+    for n in get_notes(email):
+        st.markdown(f"- {n['note']}  \n🕒 {n['timestamp']}")
 
-# --- AI PLAYGROUND TAB ---
+# --- AI PLAYGROUND ---
 with tabs[2]:
     st.header("💬 AI Playground")
-    query = st.text_area("Ask anything to AI Assistant")
-    if st.button("🚀 Ask AI"):
+    query = st.text_area("Ask the AI Assistant")
+    if st.button("Ask AI"):
         reply = ai_chat(query)
-        st.markdown(f"**AI Response:**\n\n{reply}")
+        st.markdown(f"**AI:** {reply}")
 
 # --- MEETINGS TAB ---
 with tabs[3]:
-    st.header("📅 Schedule Team Meetings")
+    st.header("📅 Team Meetings")
+    m_title = st.text_input("Meeting Title")
+    m_date = st.date_input("Meeting Date")
+    m_link = st.text_input("Meeting Link")
+    m_attendees = st.text_input("Attendees (comma-separated emails)")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        m_title = st.text_input("Meeting Title")
-        m_date = st.date_input("Meeting Date")
-        m_link = st.text_input("Meeting Link (Zoom/Meet)")
-    with col2:
-        attendee_emails = st.text_area("Attendees' Emails (comma separated)")
+    if st.button("Add Meeting"):
+        attendees = [a.strip() for a in m_attendees.split(",") if a.strip()]
+        add_meeting(m_title, str(m_date), m_link, attendees, email)
+        st.success("✅ Meeting Added!")
 
-    if st.button("📨 Add Meeting & Send Invites"):
-        emails = [e.strip() for e in attendee_emails.split(",") if e.strip()]
-        if m_title and emails:
-            add_meeting(m_title, str(m_date), m_link, emails, email)
-            send_meeting_invites(emails, m_title, str(m_date), email, m_link)
-            st.success("✅ Meeting Added & Invites Sent!")
-            st.rerun()
-        else:
-            st.warning("Please fill all required fields.")
+        email_body = f"""
+        <h3>Meeting Scheduled: {m_title}</h3>
+        <p>Date: {m_date}</p>
+        <p>Link: <a href='{m_link}'>Join Here</a></p>
+        <p>Scheduled by: {email}</p>
+        """
+        send_email(attendees, f"Meeting Invite: {m_title}", email_body)
+        st.info("📧 Email invites sent!")
+        st.rerun()
 
-    st.subheader("Upcoming Meetings")
-    meetings = get_meetings()
-    for m in meetings:
+    for m in get_meetings():
         st.markdown(f"📌 **{m['title']}** — {m['date']}  \n🔗 [Join Meeting]({m['link']})")
+
+# --- TRAVEL TAB ---
+with tabs[4]:
+    st.header("✈️ Travel Management")
+    from_city = st.text_input("From")
+    to_city = st.text_input("To")
+    traveller = st.text_input("Traveller Name")
+    t_date = st.date_input("Travel Date")
+    ticket_url = st.text_input("Ticket Link (e.g., from MakeMyTrip)")
+
+    if st.button("Add Travel Plan"):
+        add_travel_plan(from_city, to_city, traveller, str(t_date), ticket_url, email)
+        st.success("✅ Travel Plan Added!")
+        st.rerun()
+
+    st.subheader("All Travel Plans")
+    for t in get_travel_plans():
+        st.markdown(f"✈️ **{t['traveller']}** — {t['from_city']} → {t['to_city']} on {t['date']}  \n🎟️ [Ticket]({t['ticket_url']})")
