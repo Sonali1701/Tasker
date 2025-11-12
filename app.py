@@ -18,6 +18,11 @@ if not firebase_admin._apps:
         if not FIREBASE_SERVICE_ACCOUNT_B64:
             raise ValueError("Missing FIREBASE_SERVICE_ACCOUNT_B64 in secrets")
 
+        # ✅ Fix padding issue
+        missing_padding = len(FIREBASE_SERVICE_ACCOUNT_B64) % 4
+        if missing_padding != 0:
+            FIREBASE_SERVICE_ACCOUNT_B64 += "=" * (4 - missing_padding)
+
         decoded_json = base64.b64decode(FIREBASE_SERVICE_ACCOUNT_B64).decode("utf-8")
         service_account_info = json.loads(decoded_json)
         cred = credentials.Certificate(service_account_info)
@@ -121,6 +126,19 @@ def get_travel_plans():
     docs = db.collection("travels").order_by("date").stream()
     return [d.to_dict() for d in docs]
 
+def add_bank_followup(bank_name, issue, followup_date, added_by):
+    db.collection("bank_followups").add({
+        "bank_name": bank_name,
+        "issue": issue,
+        "followup_date": followup_date,
+        "added_by": added_by,
+        "timestamp": datetime.now().isoformat()
+    })
+
+def get_bank_followups():
+    docs = db.collection("bank_followups").order_by("followup_date").stream()
+    return [d.to_dict() for d in docs]
+
 # --- AUTHENTICATION ---
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
@@ -188,7 +206,14 @@ for m in meetings[:5]:
     st.sidebar.markdown(f"- {m['title']} on {m['date']}")
 
 # --- MAIN TABS ---
-tabs = st.tabs(["📋 Tasks", "📝 Notes", "💬 AI Playground", "📅 Meetings", "✈️ Travel Plans"])
+tabs = st.tabs([
+    "📋 Tasks",
+    "📝 Notes",
+    "💬 AI Playground",
+    "📅 Meetings",
+    "✈️ Travel Plans",
+    "🏦 Bank Follow-Ups"
+])
 
 # --- TASK TAB ---
 with tabs[0]:
@@ -280,3 +305,19 @@ with tabs[4]:
     st.subheader("All Travel Plans")
     for t in get_travel_plans():
         st.markdown(f"✈️ **{t['traveller']}** — {t['from_city']} → {t['to_city']} on {t['date']}  \n🎟️ [Ticket]({t['ticket_url']})")
+
+# --- BANK FOLLOW-UPS TAB ---
+with tabs[5]:
+    st.header("🏦 Bank Follow-Ups")
+    bank_name = st.text_input("Bank Name")
+    issue = st.text_area("Issue / Letter Detail")
+    followup_date = st.date_input("Next Follow-Up Date")
+
+    if st.button("Add Follow-Up"):
+        add_bank_followup(bank_name, issue, str(followup_date), email)
+        st.success("✅ Follow-up Added!")
+        st.rerun()
+
+    st.subheader("All Bank Follow-Ups")
+    for b in get_bank_followups():
+        st.markdown(f"🏦 **{b['bank_name']}** — {b['issue']}  \n📅 Follow-Up: {b['followup_date']}")
